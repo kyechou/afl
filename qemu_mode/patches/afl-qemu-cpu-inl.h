@@ -49,7 +49,7 @@
 #define AFL_QEMU_CPU_SNIPPET2 do { \
     if(tb->pc == afl_entry_point) { \
       afl_setup(); \
-      afl_forkserver(env); \
+      afl_forkserver(cpu->env_ptr); \
     } \
     afl_maybe_log(tb->pc); \
   } while (0)
@@ -81,14 +81,16 @@ static unsigned int afl_inst_rms = MAP_SIZE;
 /* Function declarations. */
 
 static void afl_setup(void);
-static void afl_forkserver(CPUArchState*);
+static void afl_forkserver(CPUState*);
 static inline void afl_maybe_log(abi_ulong);
 
-static void afl_wait_tsl(CPUArchState*, int);
+static void afl_wait_tsl(CPUState*, int);
 static void afl_request_tsl(target_ulong, target_ulong, uint64_t);
 
-static TranslationBlock *tb_find_slow(CPUArchState*, target_ulong,
-                                      target_ulong, uint64_t);
+static TranslationBlock *tb_htable_lookup(CPUState *cpu,
+                                          target_ulong pc,
+                                          target_ulong cs_base,
+                                          uint32_t flags);
 
 
 /* Data structure passed around by the translate handlers: */
@@ -154,7 +156,7 @@ static void afl_setup(void) {
 
 /* Fork server logic, invoked once we hit _start. */
 
-static void afl_forkserver(CPUArchState *env) {
+static void afl_forkserver(CPUState *env) {
 
   static unsigned char tmp[4];
 
@@ -273,7 +275,7 @@ static void afl_request_tsl(target_ulong pc, target_ulong cb, uint64_t flags) {
 /* This is the other side of the same channel. Since timeouts are handled by
    afl-fuzz simply killing the child, we can just wait until the pipe breaks. */
 
-static void afl_wait_tsl(CPUArchState *env, int fd) {
+static void afl_wait_tsl(CPUState *env, int fd) {
 
   struct afl_tsl t;
 
@@ -284,7 +286,7 @@ static void afl_wait_tsl(CPUArchState *env, int fd) {
     if (read(fd, &t, sizeof(struct afl_tsl)) != sizeof(struct afl_tsl))
       break;
 
-    tb_find_slow(env, t.pc, t.cs_base, t.flags);
+    tb_htable_lookup(env, t.pc, t.cs_base, t.flags);
 
   }
 

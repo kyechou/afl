@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # american fuzzy lop - QEMU build script
 # --------------------------------------
@@ -22,13 +22,8 @@
 # will be written to ../afl-qemu-trace.
 #
 
-QEMU_URL="http://wiki.qemu-project.org/download/qemu-2.3.0.tar.bz2"
-QEMU_SHA384="7a0f0c900f7e2048463cc32ff3e904965ab466c8428847400a0f2dcfe458108a68012c4fddb2a7e7c822b4fd1a49639b"
-
-echo "================================================="
-echo "AFL binary-only instrumentation QEMU build script"
-echo "================================================="
-echo
+QEMU_URL="http://download.qemu-project.org/qemu-2.8.0.tar.xz"
+QEMU_SHA384="c305ec10747cb2a67f2435f20f37cb78ed59d8ab4e9d1c6e9b17fe8111fe462f8053b34f317af8526a8a4f4eda7b6481"
 
 echo "[*] Performing basic sanity checks..."
 
@@ -89,7 +84,7 @@ CKSUM=`sha384sum -- "$ARCHIVE" 2>/dev/null | cut -d' ' -f1`
 
 if [ ! "$CKSUM" = "$QEMU_SHA384" ]; then
 
-  echo "[*] Downloading QEMU 2.3.0 from the web..."
+  echo "[*] Downloading QEMU 2.8.0 from the web..."
   rm -f "$ARCHIVE"
   wget -O "$ARCHIVE" -- "$QEMU_URL" || exit 1
 
@@ -110,36 +105,31 @@ fi
 
 echo "[*] Uncompressing archive (this will take a while)..."
 
-rm -rf "qemu-2.3.0" || exit 1
+rm -rf "qemu-2.8.0" || exit 1
 tar xf "$ARCHIVE" || exit 1
 
 echo "[+] Unpacking successful."
 
 echo "[*] Applying patches..."
 
-patch -p0 <patches/elfload.diff || exit 1
-patch -p0 <patches/cpu-exec.diff || exit 1
-patch -p0 <patches/translate-all.diff || exit 1
-patch -p0 <patches/syscall.diff || exit 1
+patch -p0 <patches/qemu-2.8.0.diff || exit 1
 
 echo "[+] Patching done."
 
-ORIG_CPU_TARGET="$CPU_TARGET"
+echo "[*] Configuring QEMU..."
 
-test "$CPU_TARGET" = "" && CPU_TARGET="`uname -m`"
-test "$CPU_TARGET" = "i686" && CPU_TARGET="i386"
+cd qemu-2.8.0 || exit 1
 
-echo "[*] Configuring QEMU for $CPU_TARGET..."
+CC=gcc
+CXX=g++
 
-cd qemu-2.3.0 || exit 1
-
-CFLAGS="-O3" ./configure --disable-system --enable-linux-user \
-  --enable-guest-base --disable-gtk --disable-sdl --disable-vnc \
-  --target-list="${CPU_TARGET}-linux-user" || exit 1
+CFLAGS="-O3" ./configure --python=/usr/bin/python2 --disable-system \
+  --enable-linux-user --disable-gtk --disable-sdl --disable-vnc \
+  --target-list="aarch64-linux-user armeb-linux-user arm-linux-user i386-linux-user mips64el-linux-user mips64-linux-user mipsel-linux-user mips-linux-user mipsn32el-linux-user mipsn32-linux-user ppc64abi32-linux-user ppc64le-linux-user ppc64-linux-user ppc-linux-user x86_64-linux-user" || exit 1
 
 echo "[+] Configuration complete."
 
-echo "[*] Attempting to build QEMU (fingers crossed!)..."
+echo "[*] Attempting to build QEMU..."
 
 make || exit 1
 
@@ -147,50 +137,48 @@ echo "[+] Build process successful!"
 
 echo "[*] Copying binary..."
 
-cp -f "${CPU_TARGET}-linux-user/qemu-${CPU_TARGET}" "../../afl-qemu-trace" || exit 1
+for CPU_TARGET in "aarch64" "armeb" "arm" "i386" "mips64el" "mips64" "mipsel" "mips" "mipsn32el" "mipsn32" "ppc64abi32" "ppc64le" "ppc64" "ppc" "x86_64"
+do
+  mkdir "../../afl-qemu-trace-${CPU_TARGET}"
+  cp -f "${CPU_TARGET}-linux-user/qemu-${CPU_TARGET}" "../../afl-qemu-trace-${CPU_TARGET}/afl-qemu-trace" || exit 1
+  strip -s "../../afl-qemu-trace-${CPU_TARGET}/afl-qemu-trace"
+done
+
+cp -f "../../afl-qemu-trace-$(uname -m)/afl-qemu-trace" "../../afl-qemu-trace" || exit 1
 
 cd ..
-ls -l ../afl-qemu-trace || exit 1
+ls -l ../afl-qemu-trace* || exit 1
 
 echo "[+] Successfully created '../afl-qemu-trace'."
 
-if [ "$ORIG_CPU_TARGET" = "" ]; then
+echo "[*] Testing the build..."
 
-  echo "[*] Testing the build..."
+cd ..
 
-  cd ..
+make >/dev/null || exit 1
 
-  make >/dev/null || exit 1
+gcc test-instr.c -o test-instr || exit 1
 
-  gcc test-instr.c -o test-instr || exit 1
+unset AFL_INST_RATIO
 
-  unset AFL_INST_RATIO
+echo 0 | ./afl-showmap -m none -Q -q -o .test-instr0 ./test-instr || exit 1
+echo 1 | ./afl-showmap -m none -Q -q -o .test-instr1 ./test-instr || exit 1
 
-  echo 0 | ./afl-showmap -m none -Q -q -o .test-instr0 ./test-instr || exit 1
-  echo 1 | ./afl-showmap -m none -Q -q -o .test-instr1 ./test-instr || exit 1
+rm -f test-instr
 
-  rm -f test-instr
+cmp -s .test-instr0 .test-instr1
+DR="$?"
 
-  cmp -s .test-instr0 .test-instr1
-  DR="$?"
+rm -f .test-instr0 .test-instr1
 
-  rm -f .test-instr0 .test-instr1
+if [ "$DR" = "0" ]; then
 
-  if [ "$DR" = "0" ]; then
-
-    echo "[-] Error: afl-qemu-trace instrumentation doesn't seem to work!"
-    exit 1
-
-  fi
-
-  echo "[+] Instrumentation tests passed. "
-  echo "[+] All set, you can now use the -Q mode in afl-fuzz!"
-
-else
-
-  echo "[!] Note: can't test instrumentation when CPU_TARGET set."
-  echo "[+] All set, you can now (hopefully) use the -Q mode in afl-fuzz!"
+  echo "[-] Error: afl-qemu-trace instrumentation doesn't seem to work!"
+  exit 1
 
 fi
+
+echo "[+] Instrumentation tests passed. "
+echo "[+] All set, you can now use the -Q mode in afl-fuzz!"
 
 exit 0
